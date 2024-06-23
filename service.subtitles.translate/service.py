@@ -6,6 +6,8 @@
 # ----------------------------------------------------------------------------------------------------------------------
 import os.path
 import threading
+import enum
+import time
 
 import xbmc
 import xbmcgui
@@ -22,6 +24,37 @@ logger = addon_log.logging.getLogger('.'.join((utils.logger_id, __name__.split('
 
 INDENT = ' ' * 60
 
+class TranslateOption(enum.IntEnum):
+    Extract=0
+    UseLocal=1
+    Cancel=2
+
+
+def prompt_user_translate_subtitles()->TranslateOption:
+    dialog = xbmcgui.Dialog()
+    # options = TranslateOption._member_names_
+    # default_option = TranslateOption.UseLocal
+
+    # selected = dialog.select("Translate subtitles?",options, preselect=default_option)
+    selected = dialog.yesnocustom(
+        "Translate subtitles?",
+        "Currently subtitles not the default language.\n"
+        "'Try to extract': extract 'eng' subs from the video file first (take long time)\n"
+        "'Use current': use the currently loaded subs for translation",
+        customlabel="Try to extract",
+        nolabel="Cancel",
+        yeslabel="Use current",
+        defaultbutton=xbmcgui.DLG_YESNO_YES_BTN
+    )
+
+    if selected <= 0:
+        selected_option = TranslateOption.Cancel
+    elif selected == 1:
+        selected_option = TranslateOption.UseLocal
+    else:
+        selected_option = TranslateOption.Extract
+    return selected_option
+
 
 class PlayerMonitor(Player):
     def __init__(self):
@@ -31,9 +64,14 @@ class PlayerMonitor(Player):
         self._subtitles_may_be_downloaded = False
 
     def onAVStarted(self) -> None:
+        utils.addon_info.initialise()
+        if not utils.addon_info.addon.getSettingBool('run_on_start'):
+            logger.debug("Automatic translation disabled in settings.")
+            return
         self._execute_subtitles_translation()
 
     def onPlayBackPaused(self) -> None:
+        utils.addon_info.initialise()
         if utils.addon_info.addon.getSettingBool('run_on_pause'):
             if xbmc.getCondVisibility('Window.IsActive(subtitlesearch)'):
                 logger.debug("Paused for subtitles selection. Skipping execution as most likely correct subtitles will be downloaded")
@@ -42,11 +80,10 @@ class PlayerMonitor(Player):
                 self._execute_subtitles_translation()
     
     def onPlayBackResumed(self) -> None:
+        utils.addon_info.initialise()
         if utils.addon_info.addon.getSettingBool('run_on_pause') and self._subtitles_may_be_downloaded:
             self._subtitles_may_be_downloaded = False
             self._execute_subtitles_translation()
-
-        
 
     def _execute_subtitles_translation(self) -> None:
         # noinspection PyBroadException
@@ -62,30 +99,41 @@ class PlayerMonitor(Player):
                      INDENT, self.getAvailableSubtitleStreams(),
                      INDENT, self.getSubtitles())
             
-        utils.addon_info.initialise()
-        if not utils.addon_info.addon.getSettingBool('subtitles_translate'):
-            logger.debug("Automatic translation disabled in settings.")
-            return
         preferred_lang = Language(kodi_utils.get_preferred_subtitle_lang()).id
 
-        li = self.getPlayingItem()
-        file_name = li.getProperty('subtitles.translate.file')
-        if not file_name:
-            file_name = f"{os.path.splitext(self.getPlayingFile())[0]}.{Language(self.getSubtitles()).alpha2}.srt"
-            logger.debug(f"file_name is empty. Trying to find '{file_name=}' in the movie's directory")
-            if not os.path.exists(file_name):
-                logger.debug(f"The {file_name=} does not exist")
-                return
-
-        if preferred_lang != self.getSubtitles():
+        if self.getSubtitles() != '' and preferred_lang != self.getSubtitles():
             logger.debug(f"Language of active subtitles {self.getSubtitles()} differs from {preferred_lang=}. Asking user input")
-            if not xbmcgui.Dialog().yesno("Translate subtitles?", f"The current active subtitle language {self.getSubtitles()} differs from preferred {preferred_lang}. Translate?"):
+            user_selection_trans = prompt_user_translate_subtitles()
+            logger.debug(user_selection_trans)
+            if user_selection_trans == TranslateOption.Cancel:
                 logger.debug("User does not want to translate")
                 return
             logger.debug("User wants translation")
         else:
-            logger.debug("Already in expected language")
+            logger.debug("No subtitle loaded or already in expected language")
             return
+
+        li = self.getPlayingItem()
+        file_name = li.getProperty('subtitles.translate.file')
+        if not file_name:
+            movie_file_name = os.path.splitext(self.getPlayingFile())[0]
+            # ideally we should be able to detect which exact subtitle is being used and extract if embedded one used used,
+            # however I couldn't figure out an easy way, so for now this will do it; the user must tell explicitly.
+            if user_selection_trans == TranslateOption.Extract:
+                logger.debug(f"Trying to extract from video file.")
+                # first try to use the embedded subtitle in english, must be the best, but will only work if ffmpeg is installed.
+                file_name = f"{movie_file_name}.en.srt"
+                if not utils.extract_subtitles(self.getPlayingFile(), file_name, "eng"):
+                    logger.debug("Couldn't extract the subtitle from movie.")
+                # make a small sleep as it seems that in RPi2 (at least) after file extraction it will appear empty for a while
+                time.sleep(2)
+            # we will always try local subs in the wors case
+            if not file_name or not os.path.exists(file_name):
+                file_name = f"{movie_file_name}.{Language(self.getSubtitles()).alpha2}.srt"
+                logger.debug(f"Trying to find local subtitles {file_name=}")
+                if not os.path.exists(file_name):
+                    logger.debug(f"Could not find a suitable subtitle for translation. Trying to find '{file_name=}' in the movie's directory")
+                    return
 
         base_name, file_extension = os.path.splitext(file_name)
         subs_type = li.getProperty('subtitles.translate.type')

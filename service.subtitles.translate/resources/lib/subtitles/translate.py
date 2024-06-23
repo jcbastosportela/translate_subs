@@ -11,6 +11,7 @@ import re
 import shutil
 import time
 import logging
+import hashlib
 from hashlib import md5
 from concurrent import futures
 
@@ -48,6 +49,21 @@ os.makedirs(SUBS_CACHE_DIR, exist_ok=True)
 
 
 supported_types = ('srt', '.srt')
+
+
+def compute_file_hash(file_path:str, hash_algorithm:str='sha256'):
+    # This has the potential of being heavy; one alternative is to hash just the N first lines.
+
+    # Create a hash object using the specified algorithm
+    hash_func = hashlib.new(hash_algorithm)
+    
+    # Read the file in binary mode and update the hash
+    with open(file_path, 'rb') as file:
+        while chunk := file.read(8192):
+            hash_func.update(chunk)
+    
+    # Return the hexadecimal represe
+    return hash_func.hexdigest()
 
 
 def filter_doc(srt_txt: str, filter_flags: int = 0) -> str:
@@ -191,10 +207,13 @@ def translate_file(video_file: str,
         trans_lang = Language(target_lang)
         filter_flags = get_filter_flags(filter_flags)
 
+        hash_name = compute_file_hash(file_path)
+        logger.debug(f"The cached filename is {hash_name=}")
         # Create a unique file name based on the video file, language and filter options.
         cache_file_name = os.path.join(
                 SUBS_CACHE_DIR,
-                ''.join((md5(video_file.encode('utf8')).hexdigest(),
+                ''.join((
+                         hash_name,
                          '_',
                          str(filter_flags),
                          '.',
@@ -209,6 +228,8 @@ def translate_file(video_file: str,
             shutil.copy(cache_file_name, kodi_file_name)
             save_last_translated_filename(cache_file_name)
             return kodi_file_name
+
+        orig_subs = read_subtitles_file(file_path)
 
         logger.info("Translating subtitles file %s from %s to %s", file_path, src_lang, trans_lang.id)
         t_start = time.monotonic()

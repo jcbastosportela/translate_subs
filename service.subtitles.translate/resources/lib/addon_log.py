@@ -40,7 +40,7 @@ class CtFileHandler(RotatingFileHandler):
         file_name = (utils.logger_id or 'addon') + '.log'
         logfile = os.path.join(utils.addon_info.profile, file_name)
         super(CtFileHandler, self).__init__(filename=logfile, mode='w', maxBytes=1000000, backupCount=2, encoding='utf8')
-        self.setFormatter(logging.Formatter('%(asctime)s %(levelname)-8s [%(name)s]: %(message)s'))
+        self.setFormatter(logging.Formatter('%(asctime)s %(levelname)-8s [%(name)s:%(lineno)d]: %(message)s'))
 
     def __del__(self):
         self.close()

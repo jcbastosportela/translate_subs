@@ -10,13 +10,14 @@ from __future__ import annotations
 import json
 import logging
 import os
-
+import subprocess
 
 import xbmc
 import xbmcgui
 from xbmcvfs import translatePath
 import xbmcaddon
 
+from resources.lib.translatepy import Language
 
 __version__ = "0.2.0"
 
@@ -103,3 +104,76 @@ def mark_error():
     xbmcgui.Dialog().notification(addon_info.localise(30100),
                                   addon_info.localise(30901),
                                   sound=False)
+
+def extract_progress_info(line):
+    if "time=" not in line:
+        return None
+    progress_data = {}
+    parts = line.strip().split()
+    for part in parts:
+        if '=' in part:
+            key, value = part.split('=')
+            progress_data[key] = value
+    return progress_data
+
+def calculate_progress_percentage(progress_info, total_duration):
+    time_str = progress_info.get('time', '0:00:00.00')
+    current_time = duration_str_to_seconds(time_str)
+    return (current_time / total_duration) * 100
+
+def get_video_duration(video_file):
+    command = ['ffmpeg', '-i', video_file]
+    result = subprocess.run(command, stderr=subprocess.PIPE, text=True)
+    for line in result.stderr.splitlines():
+        if "Duration" in line:
+            duration_str = line.split("Duration: ")[1].split(",")[0]
+            return duration_str_to_seconds(duration_str)
+    return None
+
+def duration_str_to_seconds(duration_str):
+    h, m, s = duration_str.split(':')
+    s, ms = s.split('.')
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 100
+
+
+def extract_subtitles(video_file:str, output_file:str, language:str)->bool:
+    total_duration = get_video_duration(video_file)
+    if not total_duration:
+        logger.error("Could not determine video duration.")
+        total_duration = 60*60
+
+    command = [
+        'ffmpeg',
+        '-i', video_file,
+        '-map', f'0:s:m:language:{Language(language).alpha3}',
+        output_file,
+        '-y'
+    ]
+    logger.debug(f"Attempting to extract subtitle {language=} from {video_file=} into {output_file=}...")
+    try:
+        # Start the ffmpeg process
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        dialog = xbmcgui.Dialog()
+
+        while process.poll() is None:
+            line = process.stdout.readline()
+            # logger.debug(line)
+            progress_info = extract_progress_info(line)
+            if progress_info:
+                logger.debug(f"{progress_info=}")
+                progress_percent = calculate_progress_percentage(progress_info, total_duration)
+                dialog.notification("Subtitle Extraction", f"Progress: {int(progress_percent)}%", time=1000)
+
+        # Wait for process to complete and check the return code
+        process.communicate()
+        if process.returncode != 0:
+            logger.error(f"ffmpeg returned non-zero exit status: {process.returncode}")
+            return False
+        
+        logger.debug(f"Subtitles extracted to {output_file}")
+        dialog.notification("Subtitle Extraction", "Completed", time=3000)
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"An error occurred: {e}\n{e.output}\n{e.stderr}\n{e.stdout}")
+        return False
+    
